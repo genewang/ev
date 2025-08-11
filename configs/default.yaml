@@ -1,0 +1,135 @@
+# EV Autonomous Trucking Perception System Configuration
+# Default configuration file
+
+system_name: "EV Autonomous Trucking Perception System"
+version: "1.0.0"
+device: "auto"  # auto, cuda, cpu, neural_engine
+
+# Sensor Configuration
+sensors:
+  lidar:
+    num_sensors: 4
+    enabled: true
+    lines: 128
+    range_meters: 100.0
+    frequency_hz: 10.0
+    resolution_degrees: 0.1
+    
+  camera:
+    num_sensors: 8
+    enabled: true
+    resolution: "8MP"
+    fps: 30
+    field_of_view: 120.0
+    spectral_bands: 3
+    
+  radar:
+    num_sensors: 6
+    enabled: true
+    frequency_ghz: 77.0
+    range_meters: 200.0
+    velocity_range: 50.0
+
+# Perception System Configuration
+perception:
+  num_classes: 20
+  num_features: 64
+  batch_size: 1
+  model_path: "models/pointnet_plus_plus.pth"
+  
+  object_detection:
+    confidence_threshold: 0.7
+    nms_threshold: 0.3
+    max_detections: 100
+    
+  segmentation:
+    num_classes: 20
+    confidence_threshold: 0.5
+
+# Multi-modal Fusion Configuration
+fusion:
+  temporal_window: 10
+  attention_mechanism: "llm_guided"
+  
+  llm_attention:
+    model_name: "qwen-7b"
+    max_length: 512
+    temperature: 0.7
+    
+  temporal:
+    filter_type: "kalman"
+    smoothing_factor: 0.8
+
+# Safety Framework Configuration
+safety:
+  max_latency_ms: 32.0
+  min_confidence: 0.8
+  asil_level: "ASIL-D"
+  
+  asil:
+    deterministic_execution: true
+    fault_tolerance: true
+    redundancy_level: 2
+    
+  wcet:
+    analysis_enabled: true
+    nominal_bound_ms: 25.0
+    acceptable_bound_ms: 32.0
+    critical_bound_ms: 50.0
+    
+  fault_injection:
+    testing_enabled: true
+    injection_rate: 0.01
+    detection_threshold: 0.95
+
+# AI Development Tools Configuration
+ai_tools:
+  simulation:
+    llm_model: "gpt-4"
+    edge_case_generation: true
+    synthetic_data_generation: true
+    
+  ticket_triage:
+    model_name: "llama-2-7b"
+    fine_tuned: true
+    target_f1: 0.92
+    inference_latency_ms: 50
+    
+  llm_integration:
+    planning_interface: true
+    natural_language_commands: true
+    auto_summarization: true
+
+# ROS2 Integration Configuration
+ros2:
+  enabled: true
+  node_name: "ev_perception"
+  namespace: "/ev"
+  
+  topics:
+    pointcloud: "perception/pointcloud"
+    detections: "perception/detections"
+    segmentation: "perception/segmentation"
+
+# Cloud Deployment Configuration
+cloud:
+  provider: "aws"
+  containerization: true
+  auto_scaling: true
+  
+  aws:
+    region: "us-west-2"
+    ecs_cluster: "ev-perception"
+    spot_instances: true
+    cost_optimization: true
+    
+  mlflow:
+    tracking_uri: "http://localhost:5000"
+    experiment_name: "ev-perception"
+
+# Performance Targets
+performance_targets:
+  end_to_end_latency_ms: 32.0
+  throughput_boost: 4.0
+  training_efficiency: 3.0
+  manual_effort_reduction: 0.4

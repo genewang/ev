@@ -1,0 +1,77 @@
+# Core ML and Perception
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+tensorrt-llm>=0.5.0
+pointnet2-pytorch>=0.3.0
+open3d>=0.17.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Computer Vision and LiDAR
+opencv-python>=4.8.0
+pillow>=9.5.0
+pcl>=0.3.0
+pykitti>=0.3.1
+
+# Multi-modal Fusion
+transformers>=4.30.0
+accelerate>=0.20.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
+
+# Safety and Reliability
+pylint>=2.17.0
+pytest>=7.3.0
+pytest-cov>=4.1.0
+safety>=2.3.0
+
+# ROS2 Integration
+rclpy>=0.1.0
+sensor-msgs>=4.2.0
+geometry-msgs>=4.2.0
+nav-msgs>=4.2.0
+
+# Cloud and Deployment
+boto3>=1.28.0
+docker>=6.1.0
+kubernetes>=26.1.0
+mlflow>=2.5.0
+
+# Data Processing
+pandas>=2.0.0
+polars>=0.19.0
+pyarrow>=12.0.0
+h5py>=3.8.0
+
+# Visualization and Monitoring
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.15.0
+tensorboard>=2.13.0
+
+# Utilities
+tqdm>=4.65.0
+pyyaml>=6.0
+click>=8.1.0
+rich>=13.3.0
+loguru>=0.7.0
+
+# Development Tools
+jupyter>=1.0.0
+ipykernel>=6.25.0
+black>=23.7.0
+isort>=5.12.0
+flake8>=6.0.0
+
+# Testing and Quality
+pytest-asyncio>=0.21.0
+pytest-mock>=3.10.0
+coverage>=7.2.0
+mypy>=1.4.0
+
+# Performance Optimization
+numba>=0.57.0
+cupy-cuda11x>=12.0.0
+onnx>=1.14.0
+onnxruntime>=1.15.0

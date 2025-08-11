@@ -1,0 +1,172 @@
+# EV Autonomous Trucking Perception System Docker Compose
+# For local development and testing
+
+version: '3.8'
+
+services:
+  ev-perception:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ev-perception
+    restart: unless-stopped
+    
+    # GPU support (requires nvidia-docker)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Environment variables
+    environment:
+      - PYTHONPATH=/app
+      - CONFIG_PATH=/app/configs/default.yaml
+      - CUDA_VISIBLE_DEVICES=0
+      - ROS_DOMAIN_ID=42
+      
+    # Volume mounts
+    volumes:
+      - ../models:/app/models
+      - ../logs:/app/logs
+      - ../data:/app/data
+      - ../configs:/app/configs:ro
+      
+    # Ports
+    ports:
+      - "8000:8000"  # API
+      - "5000:5000"  # MLflow
+      - "6006:6006"  # TensorBoard
+      
+    # Networks
+    networks:
+      - ev-network
+      
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+      
+    # Command for development
+    command: ["python", "src/main.py", "--config", "/app/configs/default.yaml", "--simulation"]
+    
+  # MLflow tracking server
+  mlflow:
+    image: python:3.9-slim
+    container_name: ev-mlflow
+    restart: unless-stopped
+    
+    environment:
+      - MLFLOW_TRACKING_URI=http://localhost:5000
+      
+    volumes:
+      - mlflow_data:/mlflow
+      
+    ports:
+      - "5001:5000"
+      
+    networks:
+      - ev-network
+      
+    command: >
+      bash -c "pip install mlflow &&
+               mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow"
+      
+  # Redis for caching and message queuing
+  redis:
+    image: redis:7-alpine
+    container_name: ev-redis
+    restart: unless-stopped
+    
+    ports:
+      - "6379:6379"
+      
+    networks:
+      - ev-network
+      
+    volumes:
+      - redis_data:/data
+      
+  # PostgreSQL for persistent data storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: ev-postgres
+    restart: unless-stopped
+    
+    environment:
+      - POSTGRES_DB=ev_perception
+      - POSTGRES_USER=ev_user
+      - POSTGRES_PASSWORD=ev_password
+      
+    ports:
+      - "5432:5432"
+      
+    networks:
+      - ev-network
+      
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      
+  # Monitoring with Prometheus and Grafana
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ev-prometheus
+    restart: unless-stopped
+    
+    ports:
+      - "9090:9090"
+      
+    networks:
+      - ev-network
+      
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+      
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+      
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ev-grafana
+    restart: unless-stopped
+    
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      
+    ports:
+      - "3000:3000"
+      
+    networks:
+      - ev-network
+      
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+
+# Networks
+networks:
+  ev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Volumes
+volumes:
+  mlflow_data:
+  redis_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
