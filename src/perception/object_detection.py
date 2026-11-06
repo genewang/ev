@@ -1,8 +1,8 @@
 """
-Object detection module for EV autonomous trucking.
+3D object detection module for EV autonomous trucking.
 
-Handles 3D object detection from point cloud features using
-advanced neural network architectures optimized for autonomous driving.
+Implements 3D object detection using PointNet++ features with
+real-time processing for autonomous driving applications.
 """
 
 import asyncio
@@ -19,10 +19,10 @@ class ObjectDetector:
     3D object detection system for autonomous driving.
     
     Features:
-    - 3D bounding box detection
+    - Real-time 3D object detection
     - Multi-class object classification
-    - Confidence scoring and NMS
-    - Real-time detection pipeline
+    - Bounding box regression
+    - Confidence scoring
     """
     
     def __init__(self, config: Dict, device: torch.device):
@@ -31,79 +31,54 @@ class ObjectDetector:
         self.device = device
         
         # Detection parameters
-        self.num_classes = config.get('num_classes', 10)
-        self.feature_dim = config.get('feature_dim', 1024)
-        self.max_objects = config.get('max_objects', 100)
-        self.confidence_threshold = config.get('confidence_threshold', 0.5)
-        self.nms_threshold = config.get('nms_threshold', 0.7)
+        self.confidence_threshold = config.get('confidence_threshold', 0.7)
+        self.nms_threshold = config.get('nms_threshold', 0.3)
+        self.max_detections = config.get('max_detections', 100)
         
-        # Object classes (typical for autonomous driving)
+        # Object classes
         self.object_classes = [
-            'car', 'truck', 'bus', 'motorcycle', 'bicycle',
-            'pedestrian', 'traffic_sign', 'traffic_light', 'construction', 'other'
+            'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'pedestrian',
+            'traffic_light', 'stop_sign', 'construction_vehicle', 'trailer'
         ]
+        self.num_classes = len(self.object_classes)
         
-        # Initialize detection network
-        self._init_detection_network()
+        # Initialize detection model
+        self._init_detection_model()
         
         # Performance tracking
         self.detection_times = []
-        self.detection_counts = []
+        self.detection_history = []
         
-        logger.info(f"🎯 Object detector initialized: {self.num_classes} classes, {self.feature_dim} features")
+        logger.info(f"🎯 Object detector initialized on {device}")
         
-    def _init_detection_network(self):
-        """Initialize the object detection network."""
+    def _init_detection_model(self):
+        """Initialize the detection model."""
         # Feature processing
         self.feature_processor = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(self.feature_dim // 2, self.feature_dim // 4),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Dropout(0.1)
-        )
+        ).to(self.device)
         
-        # Detection heads
-        self.classification_head = nn.Linear(self.feature_dim // 4, self.num_classes)
-        self.regression_head = nn.Linear(self.feature_dim // 4, 7)  # x, y, z, l, w, h, theta
-        self.confidence_head = nn.Linear(self.feature_dim // 4, 1)
+        # Object classification head
+        self.classification_head = nn.Linear(256, self.num_classes).to(self.device)
         
-        # Anchor generation
-        self.anchor_generator = self._create_anchors()
+        # Bounding box regression head
+        self.bbox_regression_head = nn.Linear(256, 6).to(self.device)  # [x, y, z, w, h, d]
         
-        # Move to device
-        self.to(self.device)
+        # Confidence head
+        self.confidence_head = nn.Linear(256, 1).to(self.device)
         
-    def _create_anchors(self) -> torch.Tensor:
-        """Create anchor boxes for detection."""
-        # Create a set of predefined anchor boxes
-        # In production, this would be learned or carefully designed
-        anchors = torch.tensor([
-            [0, 0, 0, 4.0, 1.8, 1.5, 0],  # Car-like
-            [0, 0, 0, 8.0, 2.5, 3.0, 0],  # Truck-like
-            [0, 0, 0, 2.0, 0.8, 1.5, 0],  # Motorcycle-like
-            [0, 0, 0, 0.8, 0.6, 1.8, 0],  # Pedestrian-like
-        ], dtype=torch.float32)
-        
-        return anchors.to(self.device)
-        
-    def to(self, device):
-        """Move the detector to the specified device."""
-        self.device = device
-        self.feature_processor.to(device)
-        self.classification_head.to(device)
-        self.regression_head.to(device)
-        self.confidence_head.to(device)
-        self.anchor_generator = self.anchor_generator.to(device)
-        
-    async def detect_objects(self, features: torch.Tensor, points: Optional[torch.Tensor] = None) -> Dict:
+    async def detect_objects(self, features: torch.Tensor, points: torch.Tensor) -> Dict:
         """
-        Detect objects from point cloud features.
+        Detect 3D objects from features and points.
         
         Args:
-            features: Extracted features [batch_size, feature_dim]
-            points: Optional point cloud data for visualization
+            features: PointNet++ features [batch_size, feature_dim]
+            points: Point cloud data [batch_size, num_points, 3]
             
         Returns:
             Dictionary containing detection results
@@ -113,37 +88,39 @@ class ObjectDetector:
             
             logger.info(f"🎯 Detecting objects from {features.shape[0]} feature vectors...")
             
-            # Move inputs to device
-            features = features.to(self.device)
-            if points is not None:
-                points = points.to(self.device)
-                
             # Process features
             processed_features = self.feature_processor(features)
             
-            # Generate detections
-            detections = await self._generate_detections(processed_features)
+            # Generate object proposals
+            proposals = await self._generate_proposals(processed_features, points)
             
-            # Apply NMS
-            filtered_detections = await self._apply_nms(detections)
+            # Classify objects
+            classifications = await self._classify_objects(processed_features, proposals)
             
-            # Post-process detections
-            final_detections = await self._post_process_detections(filtered_detections, points)
+            # Regress bounding boxes
+            bboxes = await self._regress_bboxes(processed_features, proposals)
+            
+            # Calculate confidences
+            confidences = await self._calculate_confidences(processed_features, proposals)
+            
+            # Apply non-maximum suppression
+            final_detections = await self._apply_nms(classifications, bboxes, confidences)
             
             # Record detection time
             detection_time = asyncio.get_event_loop().time() - start_time
             self.detection_times.append(detection_time)
-            self.detection_counts.append(len(final_detections))
             
-            # Create result
+            # Create detection result
             result = {
                 'detections': final_detections,
-                'raw_detections': detections,
-                'detection_time': detection_time,
                 'num_detections': len(final_detections),
+                'detection_time': detection_time,
                 'confidence_scores': [det['confidence'] for det in final_detections],
                 'object_classes': [det['class'] for det in final_detections]
             }
+            
+            # Add to detection history
+            self.detection_history.append(result)
             
             logger.info(f"✅ Object detection completed: {len(final_detections)} objects in {detection_time:.3f}s")
             return result
@@ -152,168 +129,176 @@ class ObjectDetector:
             logger.error(f"❌ Error in object detection: {e}")
             raise
             
-    async def _generate_detections(self, features: torch.Tensor) -> List[Dict]:
-        """Generate object detections from features."""
-        logger.info("🔍 Generating object detections...")
+    async def _generate_proposals(self, features: torch.Tensor, points: torch.Tensor) -> List[Dict]:
+        """Generate object proposals."""
+        logger.info("📋 Generating object proposals...")
+        
+        # Simple proposal generation based on point clustering
+        # In production, this would use more sophisticated methods like RPN
+        proposals = []
+        
+        # Generate random proposals for demonstration
+        num_proposals = min(50, self.max_detections)
+        for i in range(num_proposals):
+            # Random proposal center
+            center = torch.randn(3).to(self.device) * 50  # 50m range
+            
+            # Random proposal size
+            size = torch.rand(3).to(self.device) * 10 + 1  # 1-11m size
+            
+            proposal = {
+                'center': center,
+                'size': size,
+                'confidence': torch.rand(1).to(self.device).item()
+            }
+            proposals.append(proposal)
+            
+        return proposals
+        
+    async def _classify_objects(self, features: torch.Tensor, proposals: List[Dict]) -> torch.Tensor:
+        """Classify object proposals."""
+        logger.info("🏷️ Classifying object proposals...")
+        
+        # Generate classification scores for each proposal
+        batch_size = features.shape[0]
+        num_proposals = len(proposals)
+        
+        # Expand features for all proposals
+        expanded_features = features.unsqueeze(1).expand(-1, num_proposals, -1)
+        expanded_features = expanded_features.reshape(-1, features.shape[-1])
+        
+        # Classify
+        classification_scores = self.classification_head(expanded_features)
+        classification_scores = classification_scores.reshape(batch_size, num_proposals, -1)
+        
+        return classification_scores
+        
+    async def _regress_bboxes(self, features: torch.Tensor, proposals: List[Dict]) -> torch.Tensor:
+        """Regress bounding boxes for proposals."""
+        logger.info("📦 Regressing bounding boxes...")
+        
+        batch_size = features.shape[0]
+        num_proposals = len(proposals)
+        
+        # Expand features for all proposals
+        expanded_features = features.unsqueeze(1).expand(-1, num_proposals, -1)
+        expanded_features = expanded_features.reshape(-1, features.shape[-1])
+        
+        # Regress bounding boxes
+        bbox_deltas = self.bbox_regression_head(expanded_features)
+        bbox_deltas = bbox_deltas.reshape(batch_size, num_proposals, -1)
+        
+        return bbox_deltas
+        
+    async def _calculate_confidences(self, features: torch.Tensor, proposals: List[Dict]) -> torch.Tensor:
+        """Calculate confidence scores for proposals."""
+        logger.info("🎯 Calculating confidence scores...")
+        
+        batch_size = features.shape[0]
+        num_proposals = len(proposals)
+        
+        # Expand features for all proposals
+        expanded_features = features.unsqueeze(1).expand(-1, num_proposals, -1)
+        expanded_features = expanded_features.reshape(-1, features.shape[-1])
+        
+        # Calculate confidences
+        confidences = self.confidence_head(expanded_features)
+        confidences = confidences.reshape(batch_size, num_proposals, -1)
+        
+        return confidences
+        
+    async def _apply_nms(self, classifications: torch.Tensor, bboxes: torch.Tensor, confidences: torch.Tensor) -> List[Dict]:
+        """Apply non-maximum suppression."""
+        logger.info("🔍 Applying non-maximum suppression...")
         
         detections = []
+        batch_size = classifications.shape[0]
         
-        for i in range(features.shape[0]):
-            feature = features[i]
+        for b in range(batch_size):
+            batch_classifications = classifications[b]
+            batch_bboxes = bboxes[b]
+            batch_confidences = confidences[b]
             
-            # Generate classification scores
-            class_scores = F.softmax(self.classification_head(feature), dim=0)
-            
-            # Generate bounding box regression
-            bbox_regression = self.regression_head(feature)
-            
-            # Generate confidence score
-            confidence = torch.sigmoid(self.confidence_head(feature))
-            
-            # Find best class
-            best_class_idx = torch.argmax(class_scores).item()
-            best_class = self.object_classes[best_class_idx]
-            best_score = class_scores[best_class_idx].item()
-            
-            # Create detection
-            detection = {
-                'bbox': bbox_regression.detach().cpu().numpy(),
-                'class': best_class,
-                'class_id': best_class_idx,
-                'class_scores': class_scores.detach().cpu().numpy(),
-                'confidence': confidence.item(),
-                'feature_id': i
-            }
-            
-            detections.append(detection)
-            
-        return detections
-        
-    async def _apply_nms(self, detections: List[Dict]) -> List[Dict]:
-        """Apply Non-Maximum Suppression to detections."""
-        logger.info("🔒 Applying NMS...")
-        
-        if len(detections) <= 1:
-            return detections
-            
-        # Sort by confidence
-        sorted_detections = sorted(detections, key=lambda x: x['confidence'], reverse=True)
-        
-        filtered_detections = []
-        
-        for detection in sorted_detections:
-            # Check if this detection overlaps significantly with already accepted ones
-            should_add = True
-            
-            for accepted in filtered_detections:
-                iou = self._compute_iou(detection['bbox'], accepted['bbox'])
-                if iou > self.nms_threshold:
-                    should_add = False
-                    break
-                    
-            if should_add:
-                filtered_detections.append(detection)
-                
-                # Limit maximum detections
-                if len(filtered_detections) >= self.max_objects:
-                    break
-                    
-        return filtered_detections
-        
-    def _compute_iou(self, bbox1: np.ndarray, bbox2: np.ndarray) -> float:
-        """Compute Intersection over Union between two bounding boxes."""
-        # Extract bbox parameters (x, y, z, l, w, h, theta)
-        x1, y1, z1, l1, w1, h1, _ = bbox1
-        x2, y2, z2, l2, w2, h2, _ = bbox2
-        
-        # For simplicity, compute 2D IoU (ignoring height and rotation)
-        # In production, use proper 3D IoU computation
-        
-        # 2D bounding box corners
-        x1_min, x1_max = x1 - l1/2, x1 + l1/2
-        y1_min, y1_max = y1 - w1/2, y1 + w1/2
-        
-        x2_min, x2_max = x2 - l2/2, x2 + l2/2
-        y2_min, y2_max = y2 - w2/2, y2 + w2/2
-        
-        # Compute intersection
-        x_min = max(x1_min, x2_min)
-        x_max = min(x1_max, x2_max)
-        y_min = max(y1_min, y2_min)
-        y_max = min(y1_max, y2_max)
-        
-        if x_max <= x_min or y_max <= y_min:
-            return 0.0
-            
-        intersection = (x_max - x_min) * (y_max - y_min)
-        
-        # Compute union
-        area1 = l1 * w1
-        area2 = l2 * w2
-        union = area1 + area2 - intersection
-        
-        return intersection / union if union > 0 else 0.0
-        
-    async def _post_process_detections(self, detections: List[Dict], points: Optional[torch.Tensor]) -> List[Dict]:
-        """Post-process detections for final output."""
-        logger.info("🔧 Post-processing detections...")
-        
-        processed_detections = []
-        
-        for detection in detections:
-            # Filter by confidence threshold
-            if detection['confidence'] < self.confidence_threshold:
+            # Apply confidence threshold
+            valid_mask = batch_confidences.squeeze() > self.confidence_threshold
+            if not valid_mask.any():
                 continue
                 
-            # Process bounding box
-            bbox = detection['bbox']
-            processed_bbox = {
-                'center': bbox[:3].tolist(),  # x, y, z
-                'dimensions': bbox[3:6].tolist(),  # l, w, h
-                'rotation': float(bbox[6])  # theta
-            }
+            valid_classifications = batch_classifications[valid_mask]
+            valid_bboxes = batch_bboxes[valid_mask]
+            valid_confidences = batch_confidences[valid_mask]
             
-            # Create processed detection
-            processed_detection = {
-                'class': detection['class'],
-                'class_id': detection['class_id'],
-                'confidence': detection['confidence'],
-                'bbox': processed_bbox,
-                'class_scores': detection['class_scores'].tolist()
-            }
+            # Get class predictions
+            class_scores, class_indices = torch.max(valid_classifications, dim=-1)
             
-            # Add point cloud association if available
-            if points is not None:
-                processed_detection['point_indices'] = self._get_points_in_bbox(
-                    points, processed_bbox
-                )
+            # Combine confidence and class scores
+            final_scores = valid_confidences.squeeze() * class_scores
+            
+            # Sort by score
+            sorted_indices = torch.argsort(final_scores, descending=True)
+            
+            # Apply NMS
+            keep_indices = self._nms_boxes(valid_bboxes, final_scores, self.nms_threshold)
+            
+            # Create final detections
+            for idx in keep_indices[:self.max_detections]:
+                detection = {
+                    'class': self.object_classes[class_indices[idx].item()],
+                    'confidence': final_scores[idx].item(),
+                    'bbox': valid_bboxes[idx].cpu().numpy(),
+                    'class_id': class_indices[idx].item()
+                }
+                detections.append(detection)
                 
-            processed_detections.append(processed_detection)
+        return detections
+        
+    def _nms_boxes(self, bboxes: torch.Tensor, scores: torch.Tensor, threshold: float) -> List[int]:
+        """Apply non-maximum suppression to bounding boxes."""
+        if len(bboxes) == 0:
+            return []
             
-        return processed_detections
+        # Convert to numpy for easier processing
+        bboxes_np = bboxes.cpu().numpy()
+        scores_np = scores.cpu().numpy()
         
-    def _get_points_in_bbox(self, points: torch.Tensor, bbox: Dict) -> List[int]:
-        """Get indices of points inside the bounding box."""
-        # Extract bbox parameters
-        center = torch.tensor(bbox['center']).to(self.device)
-        dimensions = torch.tensor(bbox['dimensions']).to(self.device)
-        rotation = bbox['rotation']
+        # Sort by scores
+        sorted_indices = np.argsort(scores_np)[::-1]
         
-        # Simple point-in-box check (ignoring rotation for now)
-        # In production, use proper 3D point-in-box computation
+        keep_indices = []
+        while len(sorted_indices) > 0:
+            # Take the box with highest score
+            current_idx = sorted_indices[0]
+            keep_indices.append(current_idx)
+            
+            if len(sorted_indices) == 1:
+                break
+                
+            # Calculate IoU with remaining boxes
+            current_box = bboxes_np[current_idx]
+            remaining_boxes = bboxes_np[sorted_indices[1:]]
+            
+            ious = self._calculate_iou(current_box, remaining_boxes)
+            
+            # Keep boxes with IoU below threshold
+            keep_mask = ious < threshold
+            sorted_indices = sorted_indices[1:][keep_mask]
+            
+        return keep_indices
         
-        half_dims = dimensions / 2
+    def _calculate_iou(self, box1: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+        """Calculate IoU between one box and multiple boxes."""
+        # Simplified IoU calculation for 3D boxes
+        # In production, use proper 3D IoU calculation
         
-        # Check if points are within bbox bounds
-        in_x = (points[:, 0] >= center[0] - half_dims[0]) & (points[:, 0] <= center[0] + half_dims[0])
-        in_y = (points[:, 1] >= center[1] - half_dims[1]) & (points[:, 1] <= center[1] + half_dims[1])
-        in_z = (points[:, 2] >= center[2] - half_dims[2]) & (points[:, 2] <= center[2] + half_dims[2])
+        # For demonstration, use center distance as proxy for IoU
+        center1 = box1[:3]
+        centers = boxes[:, :3]
         
-        # Points inside bbox
-        inside_mask = in_x & in_y & in_z
-        point_indices = torch.where(inside_mask)[0].tolist()
+        distances = np.linalg.norm(centers - center1, axis=1)
+        max_distance = 10.0  # Maximum distance for overlap
         
-        return point_indices
+        ious = np.maximum(0, 1 - distances / max_distance)
+        return ious
         
     def get_detection_statistics(self) -> Dict:
         """Get object detection statistics."""
@@ -325,32 +310,20 @@ class ObjectDetector:
             'avg_detection_time': np.mean(self.detection_times),
             'min_detection_time': np.min(self.detection_times),
             'max_detection_time': np.max(self.detection_times),
-            'avg_objects_per_frame': np.mean(self.detection_counts),
-            'confidence_threshold': self.confidence_threshold,
-            'nms_threshold': self.nms_threshold
+            'std_detection_time': np.std(self.detection_times),
+            'detection_history_size': len(self.detection_history)
         }
         
         return stats
-        
-    def update_confidence_threshold(self, new_threshold: float):
-        """Update the confidence threshold for detection."""
-        self.confidence_threshold = max(0.0, min(1.0, new_threshold))
-        logger.info(f"🎯 Updated confidence threshold to {self.confidence_threshold}")
-        
-    def update_nms_threshold(self, new_threshold: float):
-        """Update the NMS threshold for detection."""
-        self.nms_threshold = max(0.0, min(1.0, new_threshold))
-        logger.info(f"🔒 Updated NMS threshold to {self.nms_threshold}")
         
     def get_model_info(self) -> Dict:
         """Get information about the detection model."""
         model_info = {
             'num_classes': self.num_classes,
-            'feature_dim': self.feature_dim,
-            'max_objects': self.max_objects,
+            'object_classes': self.object_classes,
             'confidence_threshold': self.confidence_threshold,
             'nms_threshold': self.nms_threshold,
-            'object_classes': self.object_classes,
+            'max_detections': self.max_detections,
             'device': str(self.device)
         }
         

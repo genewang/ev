@@ -1,8 +1,8 @@
 """
 Semantic segmentation module for EV autonomous trucking.
 
-Handles semantic segmentation of point clouds for autonomous driving,
-providing pixel-level understanding of the environment.
+Implements point-wise semantic segmentation using PointNet++ features
+for autonomous driving applications.
 """
 
 import asyncio
@@ -19,10 +19,10 @@ class SemanticSegmentation:
     Semantic segmentation system for autonomous driving.
     
     Features:
-    - Point cloud semantic segmentation
-    - Multi-class segmentation (road, vehicle, pedestrian, etc.)
-    - Real-time segmentation pipeline
-    - Confidence scoring and post-processing
+    - Point-wise semantic segmentation
+    - Multi-class segmentation
+    - Real-time processing
+    - Confidence scoring
     """
     
     def __init__(self, config: Dict, device: torch.device):
@@ -32,99 +32,50 @@ class SemanticSegmentation:
         
         # Segmentation parameters
         self.num_classes = config.get('num_classes', 20)
-        self.feature_dim = config.get('feature_dim', 1024)
-        self.point_threshold = config.get('point_threshold', 0.5)
-        self.smooth_factor = config.get('smooth_factor', 0.8)
+        self.confidence_threshold = config.get('confidence_threshold', 0.5)
         
-        # Segmentation classes (typical for autonomous driving)
+        # Segmentation classes
         self.segmentation_classes = [
             'unlabeled', 'car', 'truck', 'bus', 'motorcycle', 'bicycle',
-            'pedestrian', 'traffic_sign', 'traffic_light', 'pole', 'traffic_cone',
-            'road', 'sidewalk', 'parking', 'ground', 'building', 'vegetation',
-            'trunk', 'terrain', 'other'
+            'pedestrian', 'road', 'sidewalk', 'building', 'vegetation',
+            'sky', 'traffic_light', 'stop_sign', 'pole', 'fence',
+            'construction', 'terrain', 'other_vehicle', 'trailer'
         ]
         
-        # Color mapping for visualization
-        self.class_colors = self._generate_class_colors()
-        
-        # Initialize segmentation network
-        self._init_segmentation_network()
+        # Initialize segmentation model
+        self._init_segmentation_model()
         
         # Performance tracking
         self.segmentation_times = []
-        self.segmentation_accuracies = []
+        self.segmentation_history = []
         
-        logger.info(f"🎨 Semantic segmentation initialized: {self.num_classes} classes, {self.feature_dim} features")
+        logger.info(f"🎨 Semantic segmentation initialized on {device}")
         
-    def _generate_class_colors(self) -> Dict[str, Tuple[int, int, int]]:
-        """Generate colors for each segmentation class."""
-        # Generate distinct colors for visualization
-        colors = {}
-        np.random.seed(42)  # For reproducible colors
-        
-        for i, class_name in enumerate(self.segmentation_classes):
-            # Generate RGB color
-            r = int(np.random.randint(0, 255))
-            g = int(np.random.randint(0, 255))
-            b = int(np.random.randint(0, 255))
-            colors[class_name] = (r, g, b)
-            
-        return colors
-        
-    def _init_segmentation_network(self):
-        """Initialize the semantic segmentation network."""
+    def _init_segmentation_model(self):
+        """Initialize the segmentation model."""
         # Feature processing
         self.feature_processor = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(self.feature_dim // 2, self.feature_dim // 4),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Dropout(0.1)
-        )
+        ).to(self.device)
         
         # Segmentation head
-        self.segmentation_head = nn.Sequential(
-            nn.Linear(self.feature_dim // 4, self.feature_dim // 8),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(self.feature_dim // 8, self.num_classes)
-        )
+        self.segmentation_head = nn.Linear(256, self.num_classes).to(self.device)
         
         # Confidence head
-        self.confidence_head = nn.Sequential(
-            nn.Linear(self.feature_dim // 4, self.feature_dim // 8),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(self.feature_dim // 8, 1)
-        )
+        self.confidence_head = nn.Linear(256, 1).to(self.device)
         
-        # Post-processing layers
-        self.smoothing_layer = nn.Conv1d(
-            in_channels=self.num_classes,
-            out_channels=self.num_classes,
-            kernel_size=3,
-            padding=1
-        )
-        
-        # Move to device
-        self.to(self.device)
-        
-    def to(self, device):
-        """Move the segmentation model to the specified device."""
-        self.device = device
-        self.feature_processor.to(device)
-        self.segmentation_head.to(device)
-        self.confidence_head.to(device)
-        self.smoothing_layer.to(device)
-        
-    async def segment_points(self, features: torch.Tensor, points: Optional[torch.Tensor] = None) -> Dict:
+    async def segment_points(self, features: torch.Tensor, points: torch.Tensor) -> Dict:
         """
-        Perform semantic segmentation on point cloud features.
+        Perform semantic segmentation on point cloud.
         
         Args:
-            features: Extracted features [batch_size, feature_dim]
-            points: Optional point cloud data for visualization
+            features: PointNet++ features [batch_size, feature_dim]
+            points: Point cloud data [batch_size, num_points, 3]
             
         Returns:
             Dictionary containing segmentation results
@@ -132,53 +83,43 @@ class SemanticSegmentation:
         try:
             start_time = asyncio.get_event_loop().time()
             
-            logger.info(f"🎨 Segmenting {features.shape[0]} points...")
+            logger.info(f"🎨 Segmenting {points.shape[1]} points...")
             
-            # Move inputs to device
-            features = features.to(self.device)
-            if points is not None:
-                points = points.to(self.device)
-                
             # Process features
             processed_features = self.feature_processor(features)
             
             # Generate segmentation logits
-            segmentation_logits = self.segmentation_head(processed_features)
+            segmentation_logits = await self._generate_segmentation_logits(processed_features, points)
             
-            # Generate confidence scores
-            confidence_scores = torch.sigmoid(self.confidence_head(processed_features))
+            # Apply softmax to get probabilities
+            segmentation_probs = F.softmax(segmentation_logits, dim=-1)
             
-            # Apply post-processing
-            processed_logits = await self._post_process_logits(segmentation_logits)
+            # Get class predictions
+            class_predictions = torch.argmax(segmentation_probs, dim=-1)
             
-            # Generate final segmentation
-            segmentation_result = await self._generate_segmentation(
-                processed_logits, confidence_scores, points
-            )
+            # Calculate confidence scores
+            confidence_scores = await self._calculate_confidence_scores(processed_features, points)
+            
+            # Apply confidence threshold
+            valid_mask = confidence_scores > self.confidence_threshold
+            
+            # Create segmentation result
+            result = {
+                'segmentation_logits': segmentation_logits,
+                'segmentation_probs': segmentation_probs,
+                'class_predictions': class_predictions,
+                'confidence_scores': confidence_scores,
+                'valid_mask': valid_mask,
+                'num_points': points.shape[1],
+                'segmentation_time': asyncio.get_event_loop().time() - start_time
+            }
+            
+            # Add to segmentation history
+            self.segmentation_history.append(result)
             
             # Record segmentation time
             segmentation_time = asyncio.get_event_loop().time() - start_time
             self.segmentation_times.append(segmentation_time)
-            
-            # Compute accuracy if ground truth is available
-            if 'ground_truth' in segmentation_result:
-                accuracy = self._compute_accuracy(
-                    segmentation_result['predictions'],
-                    segmentation_result['ground_truth']
-                )
-                self.segmentation_accuracies.append(accuracy)
-                segmentation_result['accuracy'] = accuracy
-                
-            # Create result
-            result = {
-                'predictions': segmentation_result['predictions'],
-                'class_probabilities': segmentation_result['class_probabilities'],
-                'confidence_scores': segmentation_result['confidence_scores'],
-                'segmentation_time': segmentation_time,
-                'num_points': features.shape[0],
-                'num_classes': self.num_classes,
-                'class_colors': self.class_colors
-            }
             
             logger.info(f"✅ Semantic segmentation completed in {segmentation_time:.3f}s")
             return result
@@ -187,131 +128,158 @@ class SemanticSegmentation:
             logger.error(f"❌ Error in semantic segmentation: {e}")
             raise
             
-    async def _post_process_logits(self, logits: torch.Tensor) -> torch.Tensor:
-        """Post-process segmentation logits."""
-        logger.info("🔧 Post-processing segmentation logits...")
+    async def _generate_segmentation_logits(self, features: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+        """Generate segmentation logits for points."""
+        logger.info("🎨 Generating segmentation logits...")
         
-        # Apply smoothing
-        smoothed_logits = self.smoothing_layer(logits.transpose(1, 2)).transpose(1, 2)
+        batch_size, num_points = points.shape[:2]
         
-        # Combine original and smoothed logits
-        processed_logits = (self.smooth_factor * smoothed_logits + 
-                          (1 - self.smooth_factor) * logits)
+        # Expand features for all points
+        # In production, this would use proper point-wise feature extraction
+        expanded_features = features.unsqueeze(1).expand(-1, num_points, -1)
+        expanded_features = expanded_features.reshape(-1, features.shape[-1])
         
-        return processed_logits
+        # Generate segmentation logits
+        segmentation_logits = self.segmentation_head(expanded_features)
+        segmentation_logits = segmentation_logits.reshape(batch_size, num_points, -1)
         
-    async def _generate_segmentation(self, logits: torch.Tensor, confidence: torch.Tensor, 
-                                   points: Optional[torch.Tensor]) -> Dict:
-        """Generate final segmentation from processed logits."""
-        logger.info("🎯 Generating final segmentation...")
+        return segmentation_logits
         
-        # Apply softmax to get class probabilities
-        class_probabilities = F.softmax(logits, dim=-1)
+    async def _calculate_confidence_scores(self, features: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+        """Calculate confidence scores for segmentation."""
+        logger.info("🎯 Calculating confidence scores...")
         
-        # Get predicted classes
-        predictions = torch.argmax(class_probabilities, dim=-1)
+        batch_size, num_points = points.shape[:2]
         
-        # Filter by confidence threshold
-        confidence_mask = confidence.squeeze(-1) > self.point_threshold
+        # Expand features for all points
+        expanded_features = features.unsqueeze(1).expand(-1, num_points, -1)
+        expanded_features = expanded_features.reshape(-1, features.shape[-1])
         
-        # Apply confidence filtering
-        filtered_predictions = predictions.clone()
-        filtered_predictions[~confidence_mask] = 0  # Set to unlabeled class
+        # Calculate confidence scores
+        confidence_scores = self.confidence_head(expanded_features)
+        confidence_scores = confidence_scores.reshape(batch_size, num_points)
         
-        # Create segmentation result
-        segmentation_result = {
-            'predictions': filtered_predictions.detach().cpu().numpy(),
-            'class_probabilities': class_probabilities.detach().cpu().numpy(),
-            'confidence_scores': confidence.detach().cpu().numpy(),
-            'confidence_mask': confidence_mask.detach().cpu().numpy()
+        return confidence_scores
+        
+    async def get_segmentation_statistics(self, segmentation_result: Dict) -> Dict:
+        """Get statistics for segmentation result."""
+        class_predictions = segmentation_result['class_predictions']
+        confidence_scores = segmentation_result['confidence_scores']
+        valid_mask = segmentation_result['valid_mask']
+        
+        # Calculate class distribution
+        class_counts = torch.bincount(class_predictions.flatten(), minlength=self.num_classes)
+        class_distribution = class_counts.float() / class_counts.sum()
+        
+        # Calculate confidence statistics
+        valid_confidences = confidence_scores[valid_mask]
+        confidence_stats = {
+            'mean_confidence': float(torch.mean(valid_confidences)) if valid_confidences.numel() > 0 else 0.0,
+            'std_confidence': float(torch.std(valid_confidences)) if valid_confidences.numel() > 0 else 0.0,
+            'min_confidence': float(torch.min(valid_confidences)) if valid_confidences.numel() > 0 else 0.0,
+            'max_confidence': float(torch.max(valid_confidences)) if valid_confidences.numel() > 0 else 0.0
         }
         
-        # Add point cloud association if available
-        if points is not None:
-            segmentation_result['points'] = points.detach().cpu().numpy()
-            segmentation_result['point_colors'] = self._get_point_colors(
-                filtered_predictions, points
-            )
+        # Calculate segmentation quality
+        segmentation_quality = self._calculate_segmentation_quality(segmentation_result)
+        
+        return {
+            'class_distribution': class_distribution.cpu().numpy(),
+            'confidence_stats': confidence_stats,
+            'segmentation_quality': segmentation_quality,
+            'num_valid_points': int(torch.sum(valid_mask)),
+            'num_total_points': int(torch.numel(valid_mask))
+        }
+        
+    def _calculate_segmentation_quality(self, segmentation_result: Dict) -> float:
+        """Calculate overall segmentation quality."""
+        confidence_scores = segmentation_result['confidence_scores']
+        valid_mask = segmentation_result['valid_mask']
+        
+        if not valid_mask.any():
+            return 0.0
             
-        return segmentation_result
+        # Quality based on confidence scores
+        valid_confidences = confidence_scores[valid_mask]
+        mean_confidence = torch.mean(valid_confidences)
         
-    def _get_point_colors(self, predictions: torch.Tensor, points: torch.Tensor) -> np.ndarray:
-        """Get colors for each point based on segmentation."""
-        colors = np.zeros((points.shape[0], 3), dtype=np.uint8)
+        # Quality based on confidence distribution
+        confidence_std = torch.std(valid_confidences)
+        quality = float(mean_confidence * (1 - confidence_std))
         
-        for i, pred_class in enumerate(predictions):
-            class_name = self.segmentation_classes[pred_class]
-            colors[i] = self.class_colors[class_name]
+        return max(0.0, min(1.0, quality))
+        
+    async def visualize_segmentation(self, points: torch.Tensor, segmentation_result: Dict) -> Dict:
+        """Create visualization data for segmentation."""
+        logger.info("🎨 Creating segmentation visualization...")
+        
+        class_predictions = segmentation_result['class_predictions']
+        confidence_scores = segmentation_result['confidence_scores']
+        valid_mask = segmentation_result['valid_mask']
+        
+        # Create colored points based on class predictions
+        colors = self._get_class_colors()
+        point_colors = colors[class_predictions.flatten()]
+        
+        # Apply confidence-based alpha
+        alpha_values = confidence_scores.flatten()
+        point_colors = torch.cat([point_colors, alpha_values.unsqueeze(-1)], dim=-1)
+        
+        # Filter valid points
+        valid_points = points[valid_mask]
+        valid_colors = point_colors[valid_mask]
+        
+        visualization_data = {
+            'points': valid_points.cpu().numpy(),
+            'colors': valid_colors.cpu().numpy(),
+            'class_predictions': class_predictions[valid_mask].cpu().numpy(),
+            'confidence_scores': confidence_scores[valid_mask].cpu().numpy()
+        }
+        
+        return visualization_data
+        
+    def _get_class_colors(self) -> torch.Tensor:
+        """Get colors for each segmentation class."""
+        # Generate distinct colors for each class
+        colors = torch.zeros(self.num_classes, 3)
+        
+        for i in range(self.num_classes):
+            # Generate distinct colors using HSV color space
+            hue = i / self.num_classes
+            saturation = 0.8
+            value = 0.9
+            
+            # Convert HSV to RGB
+            rgb = self._hsv_to_rgb(hue, saturation, value)
+            colors[i] = torch.tensor(rgb)
             
         return colors
         
-    def _compute_accuracy(self, predictions: np.ndarray, ground_truth: np.ndarray) -> float:
-        """Compute segmentation accuracy."""
-        if predictions.shape != ground_truth.shape:
-            return 0.0
+    def _hsv_to_rgb(self, h: float, s: float, v: float) -> List[float]:
+        """Convert HSV to RGB color space."""
+        h = h * 6.0
+        i = int(h)
+        f = h - i
+        
+        p = v * (1 - s)
+        q = v * (1 - s * f)
+        t = v * (1 - s * (1 - f))
+        
+        if i == 0:
+            return [v, t, p]
+        elif i == 1:
+            return [q, v, p]
+        elif i == 2:
+            return [p, v, t]
+        elif i == 3:
+            return [p, q, v]
+        elif i == 4:
+            return [t, p, v]
+        else:
+            return [v, p, q]
             
-        correct = np.sum(predictions == ground_truth)
-        total = predictions.size
-        
-        return float(correct / total) if total > 0 else 0.0
-        
-    async def get_segmentation_statistics(self, predictions: np.ndarray) -> Dict:
-        """Get statistics about the segmentation results."""
-        logger.info("📊 Computing segmentation statistics...")
-        
-        # Count points per class
-        class_counts = {}
-        for i, class_name in enumerate(self.segmentation_classes):
-            count = np.sum(predictions == i)
-            class_counts[class_name] = int(count)
-            
-        # Compute class distribution
-        total_points = predictions.size
-        class_distribution = {}
-        for class_name, count in class_counts.items():
-            class_distribution[class_name] = count / total_points if total_points > 0 else 0.0
-            
-        # Find most common classes
-        sorted_classes = sorted(class_counts.items(), key=lambda x: x[1], reverse=True)
-        top_classes = sorted_classes[:5]
-        
-        stats = {
-            'total_points': int(total_points),
-            'class_counts': class_counts,
-            'class_distribution': class_distribution,
-            'top_classes': top_classes,
-            'num_classes_detected': len([c for c in class_counts.values() if c > 0])
-        }
-        
-        return stats
-        
-    def get_class_confidence(self, class_probabilities: np.ndarray, class_id: int) -> float:
-        """Get average confidence for a specific class."""
-        if class_id >= class_probabilities.shape[1]:
-            return 0.0
-            
-        class_probs = class_probabilities[:, class_id]
-        return float(np.mean(class_probs))
-        
-    def get_point_confidence(self, confidence_scores: np.ndarray, point_id: int) -> float:
-        """Get confidence score for a specific point."""
-        if point_id >= confidence_scores.shape[0]:
-            return 0.0
-            
-        return float(confidence_scores[point_id, 0])
-        
-    def update_confidence_threshold(self, new_threshold: float):
-        """Update the confidence threshold for segmentation."""
-        self.point_threshold = max(0.0, min(1.0, new_threshold))
-        logger.info(f"🎯 Updated confidence threshold to {self.point_threshold}")
-        
-    def update_smoothing_factor(self, new_factor: float):
-        """Update the smoothing factor for segmentation."""
-        self.smooth_factor = max(0.0, min(1.0, new_factor))
-        logger.info(f"🔄 Updated smoothing factor to {self.smooth_factor}")
-        
     def get_segmentation_statistics(self) -> Dict:
-        """Get overall segmentation performance statistics."""
+        """Get semantic segmentation statistics."""
         if not self.segmentation_times:
             return {}
             
@@ -320,9 +288,8 @@ class SemanticSegmentation:
             'avg_segmentation_time': np.mean(self.segmentation_times),
             'min_segmentation_time': np.min(self.segmentation_times),
             'max_segmentation_time': np.max(self.segmentation_times),
-            'avg_accuracy': np.mean(self.segmentation_accuracies) if self.segmentation_accuracies else 0.0,
-            'confidence_threshold': self.point_threshold,
-            'smoothing_factor': self.smooth_factor
+            'std_segmentation_time': np.std(self.segmentation_times),
+            'segmentation_history_size': len(self.segmentation_history)
         }
         
         return stats
@@ -331,26 +298,9 @@ class SemanticSegmentation:
         """Get information about the segmentation model."""
         model_info = {
             'num_classes': self.num_classes,
-            'feature_dim': self.feature_dim,
-            'confidence_threshold': self.point_threshold,
-            'smoothing_factor': self.smooth_factor,
             'segmentation_classes': self.segmentation_classes,
+            'confidence_threshold': self.confidence_threshold,
             'device': str(self.device)
         }
         
         return model_info
-        
-    def visualize_segmentation(self, points: np.ndarray, predictions: np.ndarray) -> Dict:
-        """Generate visualization data for segmentation results."""
-        # This would typically generate data for visualization tools
-        # For now, return basic visualization info
-        visualization_data = {
-            'points': points,
-            'predictions': predictions,
-            'colors': self._get_point_colors(torch.from_numpy(predictions), torch.from_numpy(points)),
-            'class_colors': self.class_colors,
-            'num_points': len(points),
-            'num_classes_detected': len(np.unique(predictions))
-        }
-        
-        return visualization_data

@@ -1,5 +1,5 @@
 # EV Autonomous Trucking Perception System Docker Compose
-# For local development and testing
+# Production-ready deployment configuration
 
 version: '3.8'
 
@@ -8,126 +8,116 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: ev-perception
+    image: ev-perception:latest
+    container_name: ev-perception-system
     restart: unless-stopped
     
-    # GPU support (requires nvidia-docker)
+    # Resource limits for production
     deploy:
       resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
         reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+          cpus: '2.0'
+          memory: 4G
     
     # Environment variables
     environment:
       - PYTHONPATH=/app
-      - CONFIG_PATH=/app/configs/default.yaml
       - CUDA_VISIBLE_DEVICES=0
-      - ROS_DOMAIN_ID=42
-      
+      - TORCH_CUDA_ARCH_LIST=6.0;6.1;7.0;7.5;8.0;8.6
+      - LOG_LEVEL=INFO
+      - CONFIG_PATH=/app/configs/default.yaml
+    
     # Volume mounts
     volumes:
-      - ../models:/app/models
-      - ../logs:/app/logs
-      - ../data:/app/data
+      - ../models:/app/models:ro
+      - ../data:/app/data:rw
+      - ../logs:/app/logs:rw
+      - ../cache:/app/cache:rw
       - ../configs:/app/configs:ro
-      
+    
     # Ports
     ports:
-      - "8000:8000"  # API
-      - "5000:5000"  # MLflow
-      - "6006:6006"  # TensorBoard
-      
-    # Networks
-    networks:
-      - ev-network
-      
+      - "8080:8080"  # Main API
+      - "9090:9090"  # Metrics
+    
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-      
-    # Command for development
-    command: ["python", "src/main.py", "--config", "/app/configs/default.yaml", "--simulation"]
+      start_period: 60s
     
-  # MLflow tracking server
-  mlflow:
-    image: python:3.9-slim
-    container_name: ev-mlflow
-    restart: unless-stopped
+    # Security
+    security_opt:
+      - no-new-privileges:true
     
-    environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
-      
-    volumes:
-      - mlflow_data:/mlflow
-      
-    ports:
-      - "5001:5000"
-      
+    # Network
     networks:
       - ev-network
-      
-    command: >
-      bash -c "pip install mlflow &&
-               mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow"
-      
+    
+    # Dependencies
+    depends_on:
+      - redis
+      - mlflow
+    
+    # Command
+    command: ["python", "src/main.py", "--config", "configs/default.yaml", "--verbose"]
+
   # Redis for caching and message queuing
   redis:
     image: redis:7-alpine
     container_name: ev-redis
     restart: unless-stopped
-    
     ports:
       - "6379:6379"
-      
+    volumes:
+      - redis-data:/data
     networks:
       - ev-network
-      
-    volumes:
-      - redis_data:/data
-      
-  # PostgreSQL for persistent data storage
-  postgres:
-    image: postgres:15-alpine
-    container_name: ev-postgres
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MLflow for experiment tracking
+  mlflow:
+    image: python:3.9-slim
+    container_name: ev-mlflow
     restart: unless-stopped
-    
-    environment:
-      - POSTGRES_DB=ev_perception
-      - POSTGRES_USER=ev_user
-      - POSTGRES_PASSWORD=ev_password
-      
     ports:
-      - "5432:5432"
-      
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      bash -c "
+        pip install mlflow[extras] &&
+        mlflow server 
+        --backend-store-uri sqlite:///mlflow/mlflow.db 
+        --default-artifact-root /mlflow/artifacts 
+        --host 0.0.0.0 
+        --port 5000
+      "
     networks:
       - ev-network
-      
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      
-  # Monitoring with Prometheus and Grafana
+
+  # Prometheus for metrics
   prometheus:
     image: prom/prometheus:latest
     container_name: ev-prometheus
     restart: unless-stopped
-    
     ports:
-      - "9090:9090"
-      
-    networks:
-      - ev-network
-      
+      - "9091:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-      
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -135,25 +125,41 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
-      
+    networks:
+      - ev-network
+
+  # Grafana for visualization
   grafana:
     image: grafana/grafana:latest
     container_name: ev-grafana
     restart: unless-stopped
-    
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      
     ports:
       - "3000:3000"
-      
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
     networks:
       - ev-network
-      
+
+  # Nginx for load balancing and SSL termination
+  nginx:
+    image: nginx:alpine
+    container_name: ev-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - ev-perception
+    networks:
+      - ev-network
 
 # Networks
 networks:
@@ -165,8 +171,11 @@ networks:
 
 # Volumes
 volumes:
-  mlflow_data:
-  redis_data:
-  postgres_data:
-  prometheus_data:
-  grafana_data:
+  redis-data:
+    driver: local
+  mlflow-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
