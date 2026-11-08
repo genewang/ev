@@ -39,8 +39,8 @@ def check_dependencies():
         logger.warning("⚠️ NumPy not available")
         
     try:
-        import opencv
-        logger.info(f"✅ OpenCV {opencv.__version__} available")
+        import cv2
+        logger.info(f"✅ OpenCV {cv2.__version__} available")
     except ImportError:
         logger.warning("⚠️ OpenCV not available")
         

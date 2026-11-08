@@ -7,11 +7,13 @@ Implements fusion of LiDAR, cameras, and radar data using LLM-guided attention.
 from .multi_modal_fusion import MultiModalFusion
 from .sensor_fusion import SensorFusion
 from .llm_attention import LLMAttention
+from .context_attention import ContextConditionedAttention
 from .temporal_fusion import TemporalFusion
 
 __all__ = [
     "MultiModalFusion",
-    "SensorFusion", 
+    "SensorFusion",
     "LLMAttention",
-    "TemporalFusion"
+    "ContextConditionedAttention",
+    "TemporalFusion",
 ]

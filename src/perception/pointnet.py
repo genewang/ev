@@ -1,11 +1,10 @@
 """
-PointNet++ implementation optimized for EV autonomous trucking perception.
+Full PointNet++ encoder for EV autonomous trucking perception.
 
-Features:
-- Neural Engine optimization for PointNet++ operations
-- Kernel fusion for reduced computational overhead
-- Achieves 32ms end-to-end latency target
-- 3x fewer labeled samples vs voxel methods
+Three set-abstraction levels, farthest-point sampling, ball-query grouping,
+and local MLPs. The production schedule is 512 points, then 128, then a
+global set. Neural Engine and TensorRT are the deployment targets for the
+32 ms vehicle budget.
 """
 
 import torch
@@ -18,12 +17,11 @@ from loguru import logger
 
 class PointNetPlusPlus(nn.Module):
     """
-    PointNet++ implementation optimized for Neural Engine.
-    
-    Achieves 32ms end-to-end latency through:
-    - Efficient point sampling and grouping
-    - Optimized MLP operations
-    - Kernel fusion for reduced overhead
+    Full PointNet++ for the vehicle perception stack.
+
+    Level 1 samples 512 points at radius 0.2 with 32 neighbors.
+    Level 2 samples 128 points at radius 0.4 with 64 neighbors.
+    Level 3 pools the whole set into a 1024-d global feature, then classifies.
     """
     
     def __init__(self, num_classes: int = 20, num_features: int = 64, device: torch.device = None):
@@ -41,16 +39,17 @@ class PointNetPlusPlus(nn.Module):
         self.num_features = num_features
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # PointNet++ architecture parameters
+        # Full PointNet++ schedule. in_channel includes the 3 relative XYZ
+        # coordinates that each set-abstraction layer concatenates.
         self.sa1 = PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32, 
-            in_channel=num_features, mlp=[64, 64, 128], 
+            npoint=512, radius=0.2, nsample=32,
+            in_channel=num_features + 3, mlp=[64, 64, 128],
             device=self.device
         )
-        
+
         self.sa2 = PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64, 
-            in_channel=128 + 3, mlp=[128, 128, 256], 
+            npoint=128, radius=0.4, nsample=64,
+            in_channel=128 + 3, mlp=[128, 128, 256],
             device=self.device
         )
         
@@ -64,7 +63,7 @@ class PointNetPlusPlus(nn.Module):
         self.fc1 = nn.Linear(1024, 512)
         self.bn1 = nn.BatchNorm1d(512)
         self.drop1 = nn.Dropout(0.4)
-        
+
         self.fc2 = nn.Linear(512, 256)
         self.bn2 = nn.BatchNorm1d(256)
         self.drop2 = nn.Dropout(0.4)
@@ -182,35 +181,30 @@ class PointNetSetAbstraction(nn.Module):
         xyz = xyz.contiguous()
         if points is not None:
             points = points.contiguous()
-            
+
         if self.npoint is not None:
-            # Farthest Point Sampling (FPS)
             fps_idx = farthest_point_sample(xyz, self.npoint)
             new_xyz = index_points(xyz, fps_idx)
-        else:
-            new_xyz = None
-            
-        if self.npoint is not None:
-            # Ball query for grouping
             idx = ball_query(self.radius, self.nsample, xyz, new_xyz)
+            grouped_xyz = index_points(xyz, idx) - new_xyz.unsqueeze(2)
+            if points is not None:
+                grouped_points = torch.cat(
+                    [grouped_xyz, index_points(points, idx)], dim=-1
+                )
+            else:
+                grouped_points = grouped_xyz
         else:
-            # Global grouping
-            idx = torch.arange(xyz.shape[1], device=self.device).repeat(xyz.shape[0], 1)
-            
-        # Group points
-        grouped_xyz = index_points(xyz, idx)
-        if new_xyz is not None:
-            grouped_xyz = grouped_xyz - new_xyz.unsqueeze(2)
-            
-        if points is not None:
-            grouped_points = index_points(points, idx)
-            if new_xyz is not None:
-                grouped_points = torch.cat([grouped_xyz, grouped_points], dim=-1)
-        else:
-            grouped_points = grouped_xyz
-            
-        # MLP feature extraction
-        grouped_points = grouped_points.permute(0, 3, 2, 1)  # (B, C, nsample, npoint)
+            # One group containing every point, centered on the cloud centroid.
+            new_xyz = xyz.mean(dim=1, keepdim=True)
+            grouped_xyz = xyz.unsqueeze(1) - new_xyz.unsqueeze(2)
+            if points is not None:
+                grouped_points = torch.cat(
+                    [grouped_xyz, points.unsqueeze(1)], dim=-1
+                )
+            else:
+                grouped_points = grouped_xyz
+
+        grouped_points = grouped_points.permute(0, 3, 2, 1).contiguous()
         
         for i, conv in enumerate(self.mlp_convs):
             bn = self.mlp_bns[i]
@@ -279,44 +273,45 @@ def index_points(points: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     return new_points
 
 
-def ball_query(radius: float, nsample: int, xyz1: torch.Tensor, xyz2: torch.Tensor) -> torch.Tensor:
+def ball_query(radius: float, nsample: int, xyz: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
     """
-    Ball query for point grouping.
-    
+    Group source points around each query point.
+
+    Neighbors outside ``radius`` are ignored. If a query has fewer than
+    ``nsample`` neighbors, the nearest in-radius point is repeated. If the
+    ball is empty, the nearest source point is used so the index tensor stays
+    valid.
+
     Args:
         radius: Query radius
-        nsample: Maximum number of points
-        xyz1: Source points (B, N, 3)
-        xyz2: Query points (B, S, 3)
-        
+        nsample: Neighbors returned per query
+        xyz: Source points (B, N, 3)
+        query: Query points (B, S, 3)
+
     Returns:
         Group indices (B, S, nsample)
     """
-    device = xyz1.device
-    B, N, C = xyz1.shape
-    _, S, _ = xyz2.shape
-    
-    # Compute pairwise distances
-    dist = torch.sum((xyz1.unsqueeze(2) - xyz2.unsqueeze(1)) ** 2, dim=-1)
-    
-    # Find points within radius
-    group_idx = torch.arange(N, dtype=torch.long, device=device).view(1, 1, N).repeat([B, S, 1])
-    group_idx[dist > radius ** 2] = N
-    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
-    
-    # Handle cases with insufficient points
-    group_first = group_idx[:, :, 0].unsqueeze(-1).repeat([1, 1, nsample])
-    range_idx = torch.arange(nsample, dtype=torch.long, device=device).view(1, 1, nsample).repeat([B, S, 1])
-    group_idx = torch.where(group_idx == N, group_first, group_idx)
-    
-    return group_idx
+    dist = torch.cdist(query, xyz)
+    outside = dist > radius
+    masked = dist.masked_fill(outside, float("inf"))
+    empty = torch.isinf(masked).all(dim=-1, keepdim=True)
+    masked = torch.where(empty, dist, masked)
+
+    k = min(nsample, xyz.shape[1])
+    idx = torch.topk(masked, k=k, dim=-1, largest=False).indices
+    if k < nsample:
+        pad = idx[:, :, :1].expand(-1, -1, nsample - k)
+        idx = torch.cat([idx, pad], dim=-1)
+    return idx
 
 
 class NeuralEngineOptimizer:
     """
-    Neural Engine optimization utilities for PointNet++.
-    
-    Implements kernel fusion and memory optimization techniques.
+    Neural Engine and inference optimization for the full PointNet++.
+
+    Mixed precision and TorchScript are the development-host path. The vehicle
+    GPU path builds a TensorRT engine from the same module. Apple Silicon uses
+    Core ML. See ``src/inference/targets.py``.
     """
     
     @staticmethod

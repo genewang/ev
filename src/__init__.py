@@ -8,14 +8,26 @@ __version__ = "1.0.0"
 __author__ = "EV Perception Team"
 __email__ = "perception@ev.com"
 
-from .perception import PerceptionSystem
-from .fusion import MultiModalFusion
-from .safety import SafetyFramework
-from .ai_tools import AIDevelopmentTools
-
 __all__ = [
     "PerceptionSystem",
-    "MultiModalFusion", 
+    "MultiModalFusion",
     "SafetyFramework",
-    "AIDevelopmentTools"
+    "AIDevelopmentTools",
 ]
+
+
+def __getattr__(name):
+    """Load top-level systems on demand so a submodule import stays small."""
+    if name == "PerceptionSystem":
+        from .perception import PerceptionSystem
+        return PerceptionSystem
+    if name == "MultiModalFusion":
+        from .fusion import MultiModalFusion
+        return MultiModalFusion
+    if name == "SafetyFramework":
+        from .safety import SafetyFramework
+        return SafetyFramework
+    if name == "AIDevelopmentTools":
+        from .ai_tools import AIDevelopmentTools
+        return AIDevelopmentTools
+    raise AttributeError(name)

@@ -1,8 +1,9 @@
 """
-LLM-guided attention module for EV autonomous trucking.
+Scenario-conditioned attention for multimodal fusion.
 
-Implements attention mechanisms using LLM guidance for optimal sensor weighting
-and feature selection in multi-modal fusion.
+The scenario id selects a learned embedding. This module does not call a
+language model. New code should use ``ContextConditionedAttention``, which
+also applies an explicit missing-modality mask.
 """
 
 import asyncio

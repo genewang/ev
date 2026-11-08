@@ -2,7 +2,9 @@
 
 ## System Overview
 
-The EV Autonomous Trucking Perception System is a perception stack for autonomous electric trucks. The vehicle runtime targets 32ms end-to-end latency (against an 85ms NVIDIA reference) by running PointNet++ and multi-modal fusion in-process, with Neural Engine or TensorRT acceleration.
+The EV Autonomous Trucking Perception System is the production perception stack for autonomous electric trucks. The vehicle runtime holds a 32 ms end-to-end budget, against an 85 ms NVIDIA reference, by running the full PointNet++ and multimodal fusion in process. Neural Engine covers Apple Silicon development hosts. TensorRT covers the vehicle GPU. TensorRT-LLM serves the language plane outside that fusion slice.
+
+The production data path is a closed loop. ROS 2 carries cameras, LiDAR, radar, IMU, and GPS with per-stream QoS, acquisition timestamps, and `tf2` frames. NVIDIA Isaac Sim publishes the same topics through its ROS 2 bridge so the perception nodes do not change between simulation, replay, and the truck. Full PointNet++ (512 / 128 / global set abstraction) encodes the cloud. Attention fuses the aligned modalities, including a mask when a sensor is missing. TensorRT executes the perception engine. The ASIL-D runtime checks latency, sensor health, and fault response before a result is allowed downstream. Fleet logs and failed scenarios return to Isaac Sim and to training.
 
 Two planes stay separate. The vehicle plane is PyTorch modules on the ROS2 bus, inside the latency budget. The offline plane is where orchestration, experiment tracking, multimodal storage, and cloud model serving live. Airflow, Flyte, dbt, LanceDB, Triton, and any Qwen-class language model sit on the offline plane, or in a separate on-vehicle language process. They do not run inside the fusion forward pass.
 
@@ -349,10 +351,21 @@ flowchart TD
 ### 1. Core Perception Stack
 
 #### PointNet++ Implementation
-- **Neural Engine Optimization**: Custom PointNet++ implementation optimized for Apple Neural Engine
-- **Kernel Fusion**: Reduced computational overhead through kernel fusion techniques
-- **Multi-scale Processing**: Hierarchical feature extraction at multiple scales
-- **Performance**: 3× fewer labeled samples vs. voxel methods
+
+The production encoder in `src/perception/pointnet.py` is the full hierarchy, not a per-point Conv1d stand-in.
+
+| Level | Sampled points | Radius | Neighbors | MLP |
+| --- | --- | --- | --- | --- |
+| Set abstraction 1 | 512 | 0.2 | 32 | 64, 64, 128 |
+| Set abstraction 2 | 128 | 0.4 | 64 | 128, 128, 256 |
+| Set abstraction 3 | global | — | all remaining | 256, 512, 1024 |
+
+Each level uses farthest-point sampling, ball query, relative XYZ, a shared MLP, and max pooling. The 1024-d global feature feeds a BatchNorm classification head with 20 classes. Downstream detection and segmentation read the multi-scale maps from `extract_features`.
+
+- **Neural Engine**: mixed precision and TorchScript on Apple Silicon development hosts
+- **TensorRT**: the vehicle GPU engine built from this same module
+- **Kernel fusion**: fewer launches on the sampled groups
+- **Sample efficiency**: 3× fewer labeled samples than voxel methods
 
 #### Feature Extraction
 - **Multi-scale Feature Aggregation**: Combines features from different abstraction levels

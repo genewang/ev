@@ -1,8 +1,9 @@
 """
-ASIL-D compliant runtime for EV autonomous trucking.
+Safety-oriented runtime prototype for EV autonomous trucking.
 
-Implements deterministic execution guarantees and fault-tolerant operation
-for safety-critical autonomous driving applications.
+The checks below are engineering guards: timeouts, confidence thresholds, and
+fault flags. They are not an ISO 26262 ASIL-D certification, a hazard analysis,
+or a measured worst-case execution time on a vehicle computer.
 """
 
 import asyncio
@@ -35,7 +36,7 @@ class ExecutionResult:
 
 class ASILRuntime:
     """
-    ASIL-D compliant runtime for safety-critical ML inference.
+    Safety-oriented runtime prototype. Not an ASIL-D certification.
     
     Features:
     - Deterministic execution guarantees

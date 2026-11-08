@@ -2,7 +2,6 @@
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
-tensorrt-llm>=0.5.0
 pointnet2-pytorch>=0.3.0
 open3d>=0.17.0
 numpy>=1.24.0
@@ -26,7 +25,9 @@ pytest>=7.3.0
 pytest-cov>=4.1.0
 safety>=2.3.0
 
-# ROS2 Integration
+# ROS 2 graph and language-model serving. Perception engines use TensorRT;
+# TensorRT-LLM serves the language plane outside the 32 ms fusion slice.
+tensorrt-llm>=0.5.0
 rclpy>=0.1.0
 sensor-msgs>=4.2.0
 geometry-msgs>=4.2.0
